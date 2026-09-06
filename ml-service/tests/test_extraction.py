@@ -93,3 +93,39 @@ class TestExtraction:
         result = extract_attributes("SS Pipe 25mm", "stainless steel pipe 25 mm")
         assert result["material"] == "stainless steel"
         assert result["dimension"] == "25"
+
+    # Thread specification extraction tests
+    def test_extracts_thread_spec_m16x50(self):
+        result = extract_attributes("Bolt M16x50")
+        assert result["thread_size"] == "M16"
+        assert result["thread_length"] == "50"
+        assert result["thread_length_unit"] == "mm"
+
+    def test_extracts_thread_spec_m16_x_50(self):
+        result = extract_attributes("Bolt M16 X 50")
+        assert result["thread_size"] == "M16"
+        assert result["thread_length"] == "50"
+        assert result["thread_length_unit"] == "mm"
+
+    def test_extracts_thread_spec_m16x50mm(self):
+        result = extract_attributes("Bolt M16x50mm")
+        assert result["thread_size"] == "M16"
+        assert result["thread_length"] == "50"
+        assert result["thread_length_unit"] == "mm"
+
+    def test_extracts_thread_spec_m10x40mm(self):
+        result = extract_attributes("Screw M10x40mm")
+        assert result["thread_size"] == "M10"
+        assert result["thread_length"] == "40"
+        assert result["thread_length_unit"] == "mm"
+
+    def test_extracts_thread_spec_with_inch_unit(self):
+        result = extract_attributes("Bolt M12x1.5 inch")
+        assert result["thread_size"] == "M12"
+        assert result["thread_length"] == "1.5"
+        assert result["thread_length_unit"] == "inch"
+
+    def test_thread_spec_populates_dimension_when_missing(self):
+        result = extract_attributes("Bolt M16x50")
+        assert result["dimension"] == "16"
+        assert result["dimension_unit"] == "mm"

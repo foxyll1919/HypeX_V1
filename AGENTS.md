@@ -52,6 +52,7 @@ pip install -r requirements.txt
 cd backend && npm run dev
 cd frontend && npm run dev
 cd ml-service && . .venv\Scripts\Activate.ps1 && uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+cd ml-service && . .venv\Scripts\Activate.ps1 && llama-server -m "D:\HypeX\HypeX_Models\Qwen3-Embedding-4B-Q4_K_M.gguf" --embeddings --port 8080
 ```
 
 ### Build frontend

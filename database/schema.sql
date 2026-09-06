@@ -7,8 +7,11 @@ USE nmm_db;
 CREATE TABLE IF NOT EXISTS materials (
   id INT AUTO_INCREMENT PRIMARY KEY,
   cpse_name VARCHAR(255) NOT NULL,
-  original_code VARCHAR(255) NOT NULL,
-  description TEXT NOT NULL,
+  original_code VARCHAR(255) NOT NULL, -- SIS_Code
+  sap_code VARCHAR(255), -- SAP_Code
+  description TEXT NOT NULL, -- Material_Description
+  material_known_as TEXT, -- Material_Known_As
+  unit VARCHAR(50), -- Unit
   specifications TEXT,
   technical_parameters TEXT,
   material_type VARCHAR(255),
@@ -25,6 +28,9 @@ CREATE TABLE IF NOT EXISTS materials (
   normalized_description TEXT,
   match_status VARCHAR(50) DEFAULT 'PENDING', -- PENDING, APPROVED, REJECTED, REVIEW, INSUFFICIENT
   national_code VARCHAR(255),
+  thread_size VARCHAR(50), -- e.g., M16
+  thread_length VARCHAR(50), -- e.g., 50
+  thread_length_unit VARCHAR(20), -- e.g., mm
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 );

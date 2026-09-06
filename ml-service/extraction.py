@@ -7,6 +7,38 @@ MATERIALS = ['stainless steel', 'carbon steel', 'mild steel', 'cast iron', 'duct
 GRADES = ['304', '316', '304l', '316l', 'ss304', 'ss316', 'a106', 'a105', 'a234', 'a182', 'gr.b', 'gr. b', 'grade b', 'f304', 'f316']
 STANDARDS = [r'asme\s+b\d+\.\d+', r'api\s+\w+', r'astm\s+[a-z]\d+', r'ansi\s+b\d+\.\d+', r'bs\s+\d+']
 
+
+def extract_thread_specification(desc: str) -> Dict[str, Any]:
+    """
+    Extract thread specifications like M16x50, M16 X 50, M16X50, M10x40mm.
+    Returns thread_size (e.g., M16) and thread_length (e.g., 50 mm).
+    """
+    result = {
+        "thread_size": None,
+        "thread_length": None,
+        "thread_length_unit": None
+    }
+    
+    # Pattern for M16x50, M16 X 50, M16X50, M10x40mm, M12x30 mm
+    # Case insensitive, no strict word boundaries
+    thread_pattern = r'(M\d+(?:\.\d+)?)\s*[xX]\s*(\d+(?:\.\d+)?)\s*(mm|cm|m|inch|in)?'
+    match = re.search(thread_pattern, desc, re.IGNORECASE)
+    if match:
+        result["thread_size"] = match.group(1).upper()  # M16
+        result["thread_length"] = match.group(2)  # 50
+        unit = match.group(3).lower() if match.group(3) else 'mm'
+        if unit in ['cm', 'centimeter', 'centimeters']:
+            result["thread_length_unit"] = 'cm'
+        elif unit in ['m', 'meter', 'meters']:
+            result["thread_length_unit"] = 'm'
+        elif unit in ['inch', 'in', 'inches', '"']:
+            result["thread_length_unit"] = 'inch'
+        else:
+            result["thread_length_unit"] = 'mm'
+    
+    return result
+
+
 def extract_attributes(description: str, normalized_desc: Optional[str] = None) -> Dict[str, Any]:
     """
     Extracts structured technical parameters from unstructured descriptions:
@@ -16,6 +48,7 @@ def extract_attributes(description: str, normalized_desc: Optional[str] = None) 
     - Primary Dimensions & Units (e.g., 25 mm, 2 inch)
     - Linear Lengths & Units (e.g., 6 m, 6000 mm)
     - Pressure Rating & Standard designations (e.g., Class 150, API 6D)
+    - Thread Specification (e.g., M16x50)
     """
     desc = normalized_desc if normalized_desc else description.lower()
     desc_raw = description.lower()
@@ -30,7 +63,10 @@ def extract_attributes(description: str, normalized_desc: Optional[str] = None) 
         "length_unit": None,
         "pressure": None,
         "pressure_unit": None,
-        "standard_reference": None
+        "standard_reference": None,
+        "thread_size": None,
+        "thread_length": None,
+        "thread_length_unit": None,
     }
     
     # 1. Product Type Extraction
@@ -97,6 +133,17 @@ def extract_attributes(description: str, normalized_desc: Optional[str] = None) 
         if dn_match:
             result["dimension"] = dn_match.group(2)
             result["dimension_unit"] = dn_match.group(1).upper()
+    
+    # 5b. Thread Specification Extraction (e.g., M16x50)
+    thread_spec = extract_thread_specification(desc)
+    result["thread_size"] = thread_spec["thread_size"]
+    result["thread_length"] = thread_spec["thread_length"]
+    result["thread_length_unit"] = thread_spec["thread_length_unit"]
+    
+    # If thread spec found and no regular dimension, use thread size as dimension
+    if result["thread_size"] and not result["dimension"]:
+        result["dimension"] = result["thread_size"].replace('M', '')
+        result["dimension_unit"] = 'mm'
             
     # 6. Length Extraction
     # Matches terms indicating linear length like: 6 m, 6m, 6 meter, 6000 mm, 6 meter length

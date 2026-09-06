@@ -64,6 +64,16 @@ const mlClient = {
       console.error('ML clustering error:', err.message);
       throw err;
     }
+  },
+
+  generateNMC: async (clusters, materials, prefix = 'NMC') => {
+    try {
+      const response = await axios.post(`${mlBaseUrl}/national-codes/generate`, { clusters, materials, prefix });
+      return response.data;
+    } catch (err) {
+      console.error('ML NMC generation error:', err.message);
+      throw err;
+    }
   }
 };
 

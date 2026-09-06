@@ -12,6 +12,7 @@ from embeddings import generate_embedding, calculate_cosine_similarity
 from matching import match_materials
 from clustering import build_material_clusters
 from typing import List, Dict, Any
+from app.services.national_code_service import generate_national_material_codes
 
 app = FastAPI(
     title="National Unified Material Master ML Service",
@@ -136,6 +137,44 @@ def pipeline_cluster_endpoint(req: Dict[str, Any]):
     approved_matches = [tuple(m) for m in req.get("approved_matches", [])]
     clusters = build_material_clusters(materials_list, approved_matches)
     return {"clusters": clusters}
+
+
+@app.post("/national-codes/generate")
+async def generate_nmc_endpoint(req: Dict[str, Any]):
+    """
+    Generate National Material Codes for validated clusters.
+    
+    Request body:
+    {
+        "clusters": [[material_id, ...], ...],
+        "materials": {material_id: {material_data_with_attributes}, ...},
+        "prefix": "NMC"  # optional
+    }
+    
+    Response:
+    {
+        "nmc_assignments": [
+            {
+                "cluster_ids": [material_id, ...],
+                "national_code": "NMC000001",
+                "canonical_description": "STAINLESS STEEL GRADE SS304 PIPE 25 MM",
+                "status": "ASSIGNED",
+                "conflicts": [],
+                "materials": [...]
+            },
+            ...
+        ]
+    }
+    """
+    clusters = req.get("clusters", [])
+    materials_map = req.get("materials", {})
+    prefix = req.get("prefix", "NMC")
+    
+    if not clusters or not materials_map:
+        raise HTTPException(status_code=400, detail="clusters and materials are required")
+    
+    nmc_assignments = await generate_national_material_codes(clusters, materials_map, prefix)
+    return {"nmc_assignments": nmc_assignments}
 
 if __name__ == "__main__":
     import uvicorn

@@ -492,6 +492,15 @@ body {
   background-color: #059669;
 }
 
+.btn-warning {
+  background-color: var(--status-review);
+  color: var(--text-white);
+}
+
+.btn-warning:hover {
+  background-color: #d97706;
+}
+
 .btn-danger {
   background-color: var(--status-rejected);
   color: var(--text-white);

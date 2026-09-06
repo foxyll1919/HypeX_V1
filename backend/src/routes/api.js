@@ -4,6 +4,9 @@ const db = require('../config/db');
 const mlClient = require('../services/mlClient');
 const erpMock = require('../services/erpMock');
 
+// In-memory job store for upload progress tracking
+const uploadJobs = new Map();
+
 // Helper to log audit trail
 async function logAudit(username, action, materialId, decision, comment) {
   try {
@@ -16,6 +19,61 @@ async function logAudit(username, action, materialId, decision, comment) {
     console.error('Audit logging failed:', err.message);
   }
 }
+
+// Generate a simple job ID
+function generateJobId() {
+  return `job_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+}
+
+// Initialize upload job
+function createUploadJob(materials, cpseName) {
+  const jobId = generateJobId();
+  const job = {
+    jobId,
+    status: 'pending',
+    totalRows: materials.length,
+    processed: 0,
+    inserted: 0,
+    duplicates: 0,
+    failed: 0,
+    errors: [],
+    startTime: Date.now(),
+    cpseName,
+    materials,
+    batchSize: 20
+  };
+  uploadJobs.set(jobId, job);
+  return jobId;
+}
+
+// Get job status
+function getJobStatus(jobId) {
+  return uploadJobs.get(jobId);
+}
+
+// Update job progress
+function updateJobProgress(jobId, updates) {
+  const job = uploadJobs.get(jobId);
+  if (job) {
+    Object.assign(job, updates);
+    if (job.status === 'completed' || job.status === 'failed') {
+      job.endTime = Date.now();
+    }
+  }
+}
+
+// Clean up old jobs (older than 1 hour)
+function cleanupOldJobs() {
+  const now = Date.now();
+  for (const [jobId, job] of uploadJobs.entries()) {
+    if (job.endTime && now - job.endTime > 3600000) {
+      uploadJobs.delete(jobId);
+    }
+  }
+}
+
+// Run cleanup every 10 minutes
+setInterval(cleanupOldJobs, 600000);
 
 // 1. GET all materials (with search & filtering)
 router.get('/materials', async (req, res) => {
@@ -91,13 +149,22 @@ router.post('/materials', async (req, res) => {
 
     const result = await db.run(
       `INSERT INTO materials (
-        cpse_name, original_code, description, specifications, technical_parameters,
+        cpse_name, original_code, sap_code, description, material_known_as, unit,
+        specifications, technical_parameters,
         material_type, material_grade, dimension, dimension_unit, length, length_unit,
-        pressure, pressure_unit, standard_reference, unit_of_measurement, classification,
-        normalized_description, match_status
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING')`,
+        standard_reference, unit_of_measurement, classification,
+        normalized_description, match_status,
+        thread_size, thread_length, thread_length_unit
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?, ?)`,
       [
-        mat.cpse_name, mat.original_code, mat.description, mat.specifications, mat.technical_parameters,
+        mat.cpse_name,
+        mat.original_code,
+        mat.sap_code || null,
+        mat.description,
+        mat.material_known_as || null,
+        mat.unit || null,
+        mat.specifications || null,
+        mat.technical_parameters || null,
         mat.material_type || extracted.product_type,
         mat.material_grade || extracted.material_grade,
         mat.dimension || extracted.dimension,
@@ -107,8 +174,12 @@ router.post('/materials', async (req, res) => {
         mat.pressure || extracted.pressure,
         mat.pressure_unit || extracted.pressure_unit,
         mat.standard_reference || extracted.standard_reference,
-        mat.unit_of_measurement, mat.classification || 'Unclassified',
-        normalized
+        mat.unit_of_measurement,
+        mat.classification || 'Unclassified',
+        normalized,
+        extracted.thread_size || null,
+        extracted.thread_length || null,
+        extracted.thread_length_unit || null
       ]
     );
 
@@ -131,18 +202,22 @@ router.put('/materials/:id', async (req, res) => {
     const mat = req.body;
     await db.run(
       `UPDATE materials SET 
-        cpse_name = ?, original_code = ?, description = ?, specifications = ?, 
-        technical_parameters = ?, material_type = ?, material_grade = ?, 
+        cpse_name = ?, original_code = ?, sap_code = ?, description = ?, material_known_as = ?, unit = ?,
+        specifications = ?, technical_parameters = ?, material_type = ?, material_grade = ?, 
         dimension = ?, dimension_unit = ?, length = ?, length_unit = ?, 
         pressure = ?, pressure_unit = ?, standard_reference = ?, 
-        unit_of_measurement = ?, classification = ?, match_status = ?, updated_at = CURRENT_TIMESTAMP
+        unit_of_measurement = ?, classification = ?, match_status = ?,
+        thread_size = ?, thread_length = ?, thread_length_unit = ?,
+        updated_at = CURRENT_TIMESTAMP
        WHERE id = ?`,
       [
-        mat.cpse_name, mat.original_code, mat.description, mat.specifications,
-        mat.technical_parameters, mat.material_type, mat.material_grade,
+        mat.cpse_name, mat.original_code, mat.sap_code, mat.description, mat.material_known_as, mat.unit,
+        mat.specifications, mat.technical_parameters, mat.material_type, mat.material_grade,
         mat.dimension, mat.dimension_unit, mat.length, mat.length_unit,
         mat.pressure, mat.pressure_unit, mat.standard_reference,
-        mat.unit_of_measurement, mat.classification, mat.match_status, req.params.id
+        mat.unit_of_measurement, mat.classification, mat.match_status,
+        mat.thread_size, mat.thread_length, mat.thread_length_unit,
+        req.params.id
       ]
     );
     await logAudit('system', 'Mapping Modified', req.params.id, mat.match_status, 'Updated material attributes');
@@ -162,26 +237,126 @@ router.post('/upload', async (req, res) => {
 
     const insertedIds = [];
     for (const mat of materials) {
-      // Basic validation
+      // Basic validation - require cpse_name, original_code (SIS_Code), description
       if (!mat.cpse_name || !mat.original_code || !mat.description) continue;
       
       const result = await db.run(
         `INSERT INTO materials (
-          cpse_name, original_code, description, specifications, technical_parameters,
+          cpse_name, original_code, sap_code, description, material_known_as, unit,
+          specifications, technical_parameters,
           material_type, material_grade, dimension, dimension_unit, length, length_unit,
-          standard_reference, unit_of_measurement, classification, match_status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING')`,
+          standard_reference, unit_of_measurement, classification, match_status,
+          thread_size, thread_length, thread_length_unit
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?, ?)`,
         [
-          mat.cpse_name, mat.original_code, mat.description, mat.specifications, mat.technical_parameters,
-          mat.material_type, mat.material_grade, mat.dimension, mat.dimension_unit, mat.length, mat.length_unit,
-          mat.standard_reference, mat.unit_of_measurement, mat.classification || 'Unclassified'
+          mat.cpse_name,
+          mat.original_code, // SIS_Code
+          mat.sap_code || null, // SAP_Code
+          mat.description, // Material_Description
+          mat.material_known_as || null, // Material_Known_As
+          mat.unit || null, // Unit
+          mat.specifications || null,
+          mat.technical_parameters || null,
+          mat.material_type || null,
+          mat.material_grade || null,
+          mat.dimension || null,
+          mat.dimension_unit || null,
+          mat.length || null,
+          mat.length_unit || null,
+          mat.standard_reference || null,
+          mat.unit_of_measurement || null,
+          mat.classification || 'Unclassified',
+          null, // thread_size
+          null, // thread_length
+          null  // thread_length_unit
         ]
       );
       insertedIds.push(result.id);
-      await logAudit('system', 'Material Uploaded', result.id, 'PENDING', `Batch imported code ${mat.original_code}`);
+      await logAudit('system', 'Material Uploaded', result.id, 'PENDING', `Batch imported SIS code ${mat.original_code}`);
     }
 
     res.json({ success: true, count: insertedIds.length });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 5b. POST start upload job (initiates async import with progress tracking)
+router.post('/upload/start', async (req, res) => {
+  try {
+    const { materials, cpseName } = req.body;
+    if (!materials || !Array.isArray(materials)) {
+      return res.status(400).json({ error: 'Invalid materials upload payload' });
+    }
+    if (!cpseName) {
+      return res.status(400).json({ error: 'CPSE Name is required' });
+    }
+
+    // Validate all rows have required fields
+    const validMaterials = [];
+    const validationErrors = [];
+    materials.forEach((mat, idx) => {
+      if (!mat.cpse_name || !mat.original_code || !mat.description) {
+        validationErrors.push(`Row ${idx + 1}: Missing required fields (cpse_name, original_code, description)`);
+      } else {
+        validMaterials.push(mat);
+      }
+    });
+
+    if (validMaterials.length === 0) {
+      return res.status(400).json({ error: 'No valid records to import', validationErrors });
+    }
+
+    // Create upload job
+    const jobId = createUploadJob(validMaterials, cpseName);
+    
+    // Start async processing
+    processUploadJob(jobId).catch(err => {
+      console.error('Upload job processing error:', err);
+      updateJobProgress(jobId, { status: 'failed', errors: [{ reason: err.message }] });
+    });
+
+    res.json({ 
+      success: true, 
+      jobId,
+      totalRows: validMaterials.length,
+      validationErrors: validationErrors.length > 0 ? validationErrors : undefined
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 5c. GET upload job status
+router.get('/upload/status/:jobId', async (req, res) => {
+  try {
+    const { jobId } = req.params;
+    const job = getJobStatus(jobId);
+    
+    if (!job) {
+      return res.status(404).json({ error: 'Upload job not found' });
+    }
+
+    const percentage = job.totalRows > 0 ? Math.round((job.processed / job.totalRows) * 100) : 0;
+    
+    res.json({
+      jobId: job.jobId,
+      status: job.status,
+      totalRows: job.totalRows,
+      processed: job.processed,
+      inserted: job.inserted,
+      duplicates: job.duplicates,
+      failed: job.failed,
+      percentage,
+      errors: job.errors,
+      startTime: job.startTime,
+      endTime: job.endTime,
+      beforeCount: job.beforeCount,
+      afterCount: job.afterCount,
+      expected: job.expected,
+      found: job.found,
+      verified: job.verified
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -209,7 +384,10 @@ router.post('/match', async (req, res) => {
       id: m.id,
       cpse_name: m.cpse_name,
       original_code: m.original_code,
+      sap_code: m.sap_code,
       description: m.description,
+      material_known_as: m.material_known_as,
+      unit: m.unit,
       specifications: m.specifications,
       technical_parameters: m.technical_parameters,
       material_type: m.material_type,
@@ -224,6 +402,9 @@ router.post('/match', async (req, res) => {
       unit_of_measurement: m.unit_of_measurement,
       classification: m.classification,
       normalized_description: m.normalized_description,
+      thread_size: m.thread_size,
+      thread_length: m.thread_length,
+      thread_length_unit: m.thread_length_unit,
       embedding: embeddingMap[m.id]
     }));
 
@@ -243,12 +424,15 @@ router.post('/match', async (req, res) => {
           length_unit = ?,
           pressure = ?,
           pressure_unit = ?,
-          standard_reference = ?
+          standard_reference = ?,
+          thread_size = ?,
+          thread_length = ?,
+          thread_length_unit = ?
          WHERE id = ?`,
         [
           pm.normalized_description, pm.material_type, pm.material_grade, pm.dimension,
           pm.dimension_unit, pm.length, pm.length_unit, pm.pressure, pm.pressure_unit,
-          pm.standard_reference, pm.id
+          pm.standard_reference, pm.thread_size, pm.thread_length, pm.thread_length_unit, pm.id
         ]
       );
 
@@ -307,7 +491,7 @@ router.post('/match', async (req, res) => {
 router.get('/matches', async (req, res) => {
   try {
     const rows = await db.all(
-      `SELECT m.*, 
+      `SELECT m.*,
               ma.original_code as original_code_a, ma.description as description_a, ma.cpse_name as cpse_name_a, ma.material_grade as grade_a, ma.dimension as dimension_a, ma.dimension_unit as unit_a, ma.length as length_a, ma.length_unit as len_unit_a,
               mb.original_code as original_code_b, mb.description as description_b, mb.cpse_name as cpse_name_b, mb.material_grade as grade_b, mb.dimension as dimension_b, mb.dimension_unit as unit_b, mb.length as length_b, mb.length_unit as len_unit_b
        FROM matches m
@@ -316,12 +500,24 @@ router.get('/matches', async (req, res) => {
        ORDER BY m.final_score DESC`
     );
     // Parse JSON arrays for display
-    const parsed = rows.map(r => ({
-      ...r,
-      comparison: r.comparison ? JSON.parse(r.comparison) : {}
-    }));
+    const parsed = rows.map(r => {
+      let comparison = {};
+      if (r.comparison) {
+        try {
+          comparison = JSON.parse(r.comparison);
+        } catch (parseErr) {
+          console.error(`Failed to parse comparison for match ${r.id}:`, r.comparison);
+          comparison = { error: 'Invalid JSON in database', raw: r.comparison };
+        }
+      }
+      return {
+        ...r,
+        comparison
+      };
+    });
     res.json(parsed);
   } catch (err) {
+    console.error('Error fetching matches:', err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -329,7 +525,7 @@ router.get('/matches', async (req, res) => {
 // Helper function to re-evaluate clusters using Disjoint-Set union-find
 async function updateClustersAndNationalCodes() {
   // 1. Gathers all active material IDs
-  const mats = await db.all(`SELECT id FROM materials`);
+  const mats = await db.all(`SELECT * FROM materials`);
   const materialIds = mats.map(m => m.id);
   
   // 2. Gathers approved match edges
@@ -368,67 +564,60 @@ async function updateClustersAndNationalCodes() {
     clusterGroups = Object.values(groups);
   }
 
-  // 4. Update SQL clusters, national_codes, mappings, and material codes
-  // First, empty mappings and cluster tables to re-populate from scratch safely (preserving transactions)
+  // Build materials map for NMC generation
+  const materialsMap = {};
+  for (const m of mats) {
+    materialsMap[m.id] = m;
+  }
+
+  // 4. Generate NMCs using ML service
+  let nmcAssignments = [];
+  try {
+    const nmcRes = await mlClient.generateNMC(clusterGroups, materialsMap, 'NMC');
+    nmcAssignments = nmcRes.nmc_assignments;
+  } catch (err) {
+    console.error('FastAPI NMC generation failed, using JS fallback:', err.message);
+    // Fallback to existing logic
+    nmcAssignments = generateNMCFallback(clusterGroups, materialsMap);
+  }
+
+  // 5. Update SQL clusters, national_codes, mappings, and material codes
   await db.run(`DELETE FROM cluster_members`);
   await db.run(`DELETE FROM mappings`);
   await db.run(`DELETE FROM clusters`);
   await db.run(`DELETE FROM national_codes`);
   
-  // Reset all materials' national code back to null unless they are in approved clusters of size > 1,
-  // or we map all clusters (including singletons) to maintain national standardization.
-  // The system standardizes EVERYTHING: clusters of size 1 just represent unique items that have standard codes generated.
-  // This is clean!
   await db.run(`UPDATE materials SET national_code = NULL, match_status = 'PENDING' WHERE match_status = 'APPROVED'`);
 
-  let index = 1;
-  for (const group of clusterGroups) {
-    if (group.length === 0) continue;
-    
-    // Sort cluster members to keep NMC generation deterministic
-    group.sort((a,b) => a - b);
-
-    const clusterId = `CL-${String(index).padStart(5, '0')}`;
-    const nationalCode = `NMC-${String(index).padStart(5, '0')}`;
-    
-    // Fetch members to extract a standardized description
-    const membersData = [];
-    for (const mid of group) {
-      const m = await db.get(`SELECT * FROM materials WHERE id = ?`, [mid]);
-      if (m) membersData.push(m);
-    }
-    
-    if (membersData.length === 0) continue;
-
-    // Pick description of item with highest detailed fields or first item as representative standard
-    // Find representative which has material and grade info
-    let representative = membersData[0];
-    for (const m of membersData) {
-      if (m.material_grade && m.dimension) {
-        representative = m;
-        break;
+  for (const assignment of nmcAssignments) {
+    if (!assignment.national_code || assignment.status === 'CONFLICT') {
+      // Log conflicts but don't assign NMC
+      console.warn(`Cluster conflict detected for materials ${assignment.cluster_ids}:`, assignment.conflicts);
+      // Still create materials as unclustered or with special status
+      for (const mid of assignment.cluster_ids) {
+        await db.run(
+          `UPDATE materials SET match_status = 'REVIEW' WHERE id = ?`,
+          [mid]
+        );
       }
+      continue;
     }
 
-    // Construct standardized description: E.g. "Stainless Steel Pipe, 25 mm, Grade 304"
-    let stdDesc = representative.description;
-    if (representative.material_type) {
-      const matName = representative.material_type.charAt(0).toUpperCase() + representative.material_type.slice(1);
-      const gradePart = representative.material_grade ? `, Grade ${representative.material_grade}` : '';
-      const dimPart = representative.dimension ? `, ${representative.dimension} ${representative.dimension_unit || ''}` : '';
-      stdDesc = `${matName}${dimPart}${gradePart}`;
-    }
+    const clusterId = `CL-${assignment.national_code.replace('NMC-', '').padStart(5, '0')}`;
+    const nationalCode = assignment.national_code;
+    const stdDesc = assignment.canonical_description;
 
-    // Determine category based on product type
-    const category = representative.material_type ? 
-      (representative.material_type.endsWith('e') ? representative.material_type + 's' : representative.material_type + 'es') : 'General';
+    // Determine category from first material
+    const firstMat = materialsMap[assignment.cluster_ids[0]];
+    const category = firstMat?.material_type ? 
+      (firstMat.material_type.endsWith('e') ? firstMat.material_type + 's' : firstMat.material_type + 'es') : 'General';
     const cleanCategory = category.charAt(0).toUpperCase() + category.slice(1);
 
     // Save National Code
     await db.run(
       `INSERT INTO national_codes (code, standard_description, category, specifications) 
        VALUES (?, ?, ?, ?)`,
-      [nationalCode, stdDesc, cleanCategory, representative.specifications || '']
+      [nationalCode, stdDesc, cleanCategory, firstMat?.specifications || '']
     );
 
     // Save Cluster
@@ -439,34 +628,252 @@ async function updateClustersAndNationalCodes() {
     );
 
     // Link members
-    for (const m of membersData) {
+    for (const mid of assignment.cluster_ids) {
+      const m = materialsMap[mid];
+      if (!m) continue;
+      
       await db.run(
         `INSERT INTO cluster_members (cluster_id, material_id) VALUES (?, ?)`,
-        [clusterId, m.id]
+        [clusterId, mid]
       );
       
-      // Update material record mapping
-      // Set status to approved if it belongs to a cluster containing multiple CPSEs, or if it is standard approved
-      // We check if size of group > 1. If size is 1, it's pending review or unclustered.
-      // But if the user approved the match that created this group, its size is > 1.
-      const matchStatus = group.length > 1 ? 'APPROVED' : 'PENDING';
+      const matchStatus = assignment.cluster_ids.length > 1 ? 'APPROVED' : 'PENDING';
       
       await db.run(
         `UPDATE materials SET national_code = ?, match_status = ? WHERE id = ?`,
-        [nationalCode, matchStatus, m.id]
+        [nationalCode, matchStatus, mid]
       );
 
-      // Save Mapping Traceability row
       await db.run(
         `INSERT INTO mappings (national_code, cpse_name, original_code, material_id) 
          VALUES (?, ?, ?, ?)`,
-        [nationalCode, m.cpse_name, m.original_code, m.id]
+        [nationalCode, m.cpse_name, m.original_code, mid]
       );
     }
+  }
+  console.log(`Re-clustered into ${nmcAssignments.filter(a => a.national_code).length} Master Codes.`);
+}
+
+function generateNMCFallback(clusterGroups, materialsMap) {
+  // Fallback NMC generation (original logic)
+  const assignments = [];
+  let index = 1;
+  for (const group of clusterGroups) {
+    if (group.length === 0) continue;
+    
+    group.sort((a,b) => a - b);
+    const membersData = group.map(mid => materialsMap[mid]).filter(Boolean);
+    if (membersData.length === 0) continue;
+
+    let representative = membersData[0];
+    for (const m of membersData) {
+      if (m.material_grade && m.dimension) {
+        representative = m;
+        break;
+      }
+    }
+
+    let stdDesc = representative.description;
+    if (representative.material_type) {
+      const matName = representative.material_type.charAt(0).toUpperCase() + representative.material_type.slice(1);
+      const gradePart = representative.material_grade ? `, Grade ${representative.material_grade}` : '';
+      const dimPart = representative.dimension ? `, ${representative.dimension} ${representative.dimension_unit || ''}` : '';
+      stdDesc = `${matName}${dimPart}${gradePart}`;
+    }
+
+    const nationalCode = `NMC-${String(index).padStart(6, '0')}`;
+    
+    assignments.push({
+      cluster_ids: group,
+      national_code: nationalCode,
+      canonical_description: stdDesc,
+      status: 'ASSIGNED',
+      conflicts: [],
+      materials: membersData
+    });
 
     index++;
   }
-  console.log(`Re-clustered into ${index - 1} Master Codes.`);
+  return assignments;
+}
+
+// Process upload job asynchronously with batch processing and progress updates
+async function processUploadJob(jobId) {
+  const job = getJobStatus(jobId);
+  if (!job) return;
+
+  try {
+    updateJobProgress(jobId, { status: 'importing' });
+    
+    // Get current database count before import
+    const countResult = await db.get(`SELECT COUNT(*) as count FROM materials`);
+    const beforeCount = countResult.count;
+
+    const materials = job.materials;
+    const batchSize = job.batchSize;
+    const totalRows = materials.length;
+
+    // Process in batches
+    for (let i = 0; i < totalRows; i += batchSize) {
+      const batch = materials.slice(i, i + batchSize);
+      let batchInserted = 0;
+      let batchDuplicates = 0;
+      let batchFailed = 0;
+
+      // Use transaction for batch
+      const conn = await db.pool.getConnection();
+      try {
+        await conn.beginTransaction();
+
+        for (const mat of batch) {
+          try {
+            // Check for duplicate based on CPSE + original_code
+            const existing = await conn.execute(
+              `SELECT id FROM materials WHERE cpse_name = ? AND original_code = ?`,
+              [mat.cpse_name, mat.original_code]
+            );
+            
+            if (existing[0].length > 0) {
+              batchDuplicates++;
+              job.errors.push({
+                row: i + batch.indexOf(mat) + 1,
+                originalCode: mat.original_code,
+                status: 'DUPLICATE',
+                reason: `Record with CPSE '${mat.cpse_name}' and SIS_Code '${mat.original_code}' already exists`
+              });
+              continue;
+            }
+
+            // Insert new record
+            const result = await conn.execute(
+              `INSERT INTO materials (
+                cpse_name, original_code, sap_code, description, material_known_as, unit,
+                specifications, technical_parameters,
+                material_type, material_grade, dimension, dimension_unit, length, length_unit,
+                standard_reference, unit_of_measurement, classification, match_status,
+                thread_size, thread_length, thread_length_unit
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?, ?)`,
+              [
+                mat.cpse_name,
+                mat.original_code,
+                mat.sap_code || null,
+                mat.description,
+                mat.material_known_as || null,
+                mat.unit || null,
+                mat.specifications || null,
+                mat.technical_parameters || null,
+                mat.material_type || null,
+                mat.material_grade || null,
+                mat.dimension || null,
+                mat.dimension_unit || null,
+                mat.length || null,
+                mat.length_unit || null,
+                mat.standard_reference || null,
+                mat.unit_of_measurement || null,
+                mat.classification || 'Unclassified',
+                null, // thread_size
+                null, // thread_length
+                null  // thread_length_unit
+              ]
+            );
+
+            const materialId = result[0].insertId;
+            batchInserted++;
+            
+            // Log audit
+            await conn.execute(
+              `INSERT INTO audit_logs (username, action, material_id, decision, comment) 
+               VALUES (?, ?, ?, ?, ?)`,
+              ['system', 'Material Uploaded', materialId, 'PENDING', `Batch imported SIS code ${mat.original_code}`]
+            );
+
+          } catch (err) {
+            batchFailed++;
+            job.errors.push({
+              row: i + batch.indexOf(mat) + 1,
+              originalCode: mat.original_code,
+              status: 'FAILED',
+              reason: err.message
+            });
+            console.error('Failed to insert material:', err.message);
+          }
+        }
+
+        await conn.commit();
+      } catch (err) {
+        await conn.rollback();
+        batchFailed = batch.length;
+        batchInserted = 0;
+        batchDuplicates = 0;
+        batch.forEach((mat, idx) => {
+          job.errors.push({
+            row: i + idx + 1,
+            originalCode: mat.original_code,
+            status: 'FAILED',
+            reason: `Transaction failed: ${err.message}`
+          });
+        });
+        console.error('Batch transaction failed:', err.message);
+      } finally {
+        conn.release();
+      }
+
+      job.inserted += batchInserted;
+      job.duplicates += batchDuplicates;
+      job.failed += batchFailed;
+      job.processed = Math.min(i + batchSize, totalRows);
+
+      updateJobProgress(jobId, { 
+        processed: job.processed,
+        inserted: job.inserted,
+        duplicates: job.duplicates,
+        failed: job.failed,
+        errors: job.errors
+      });
+
+      // Small delay to allow progress updates to be visible
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+
+    // Database verification - confirm records exist
+    updateJobProgress(jobId, { status: 'verifying' });
+    
+    const verifyResult = await db.get(`SELECT COUNT(*) as count FROM materials`);
+    const afterCount = verifyResult.count;
+    const expectedAfter = beforeCount + job.inserted;
+    const verified = afterCount >= expectedAfter;
+    
+    // Determine final status based on results
+    let finalStatus = 'completed';
+    if (job.failed > 0 && job.inserted === 0) {
+      finalStatus = 'failed';
+    } else if (job.failed > 0 && job.inserted > 0) {
+      finalStatus = 'partial';
+    }
+    
+    updateJobProgress(jobId, { 
+      status: finalStatus,
+      processed: totalRows,
+      percentage: 100,
+      beforeCount,
+      afterCount,
+      expected: expectedAfter,
+      found: afterCount,
+      verified
+    });
+    
+    const auditDecision = job.failed === 0 ? 'SUCCESS' : (job.inserted > 0 ? 'PARTIAL' : 'FAILED');
+    await logAudit('system', 'CSV_IMPORT', null, auditDecision, 
+      `CSV import completed: ${job.inserted} inserted, ${job.duplicates} duplicates, ${job.failed} failed`);
+
+  } catch (err) {
+    console.error('Upload job failed:', err);
+    updateJobProgress(jobId, { 
+      status: 'failed', 
+      errors: [...job.errors, { reason: err.message }],
+      endTime: Date.now()
+    });
+  }
 }
 
 // 8. APPROVE a candidate match
@@ -633,11 +1040,29 @@ router.get('/national-codes', async (req, res) => {
 // 13. GET Traceability Mappings
 router.get('/mappings', async (req, res) => {
   try {
-    const rows = await db.all(
-      `SELECT m.*, mat.description as original_description, mat.match_status
-       FROM mappings m
-       JOIN materials mat ON m.material_id = mat.id`
-    );
+    const { national_code } = req.query;
+    let sql = `SELECT m.*, mat.description as original_description, mat.match_status,
+               mat.normalized_description, mat.material_type, mat.material_grade,
+               mat.dimension, mat.dimension_unit, mat.length, mat.length_unit,
+               mat.pressure, mat.pressure_unit, mat.standard_reference,
+               mat.unit_of_measurement, mat.classification, mat.national_code,
+               mat.thread_size, mat.thread_length, mat.thread_length_unit,
+               c.standard_description as canonical_description, c.category,
+               cl.id as cluster_id
+        FROM mappings m
+        JOIN materials mat ON m.material_id = mat.id
+        JOIN national_codes c ON m.national_code = c.code
+        LEFT JOIN cluster_members cl ON cl.material_id = mat.id`;
+    const params = [];
+    
+    if (national_code) {
+      sql += ` WHERE m.national_code = ?`;
+      params.push(national_code);
+    }
+    
+    sql += ` ORDER BY m.national_code, m.cpse_name`;
+    
+    const rows = await db.all(sql, params);
     res.json(rows);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -745,7 +1170,115 @@ router.get('/audit-logs', async (req, res) => {
   }
 });
 
-// 16. ERP / SAP Mock endpoints
+// 16. POST Generate National Material Codes
+router.post('/national-codes/generate', async (req, res) => {
+  try {
+    // Trigger cluster recomputation and NMC generation
+    await updateClustersAndNationalCodes();
+    
+    // Return updated national codes
+    const codes = await db.all(`SELECT * FROM national_codes`);
+    const enriched = [];
+    for (const c of codes) {
+      const maps = await db.all(`SELECT * FROM mappings WHERE national_code = ?`, [c.code]);
+      const cpses = [...new Set(maps.map(m => m.cpse_name))];
+      enriched.push({
+        ...c,
+        source_cpse_count: cpses.length,
+        original_codes_count: maps.length,
+        cpses: cpses.join(', '),
+        original_codes: maps.map(m => m.original_code).join(', ')
+      });
+    }
+    
+    await logAudit('system', 'NMC Created', null, 'SUCCESS', `Generated ${enriched.length} National Material Codes`);
+    res.json({ success: true, nationalCodes: enriched, count: enriched.length });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 17. GET Export National Material Master CSV
+router.get('/national-codes/export', async (req, res) => {
+  try {
+    const mappings = await db.all(
+      `SELECT m.*, mat.description as original_description, mat.normalized_description,
+              mat.material_type, mat.material_grade, mat.dimension, mat.dimension_unit,
+              mat.length, mat.length_unit, mat.pressure, mat.pressure_unit,
+              mat.standard_reference, mat.unit_of_measurement, mat.classification,
+              mat.match_status, mat.national_code,
+              c.standard_description as canonical_description,
+              c.category
+       FROM mappings m
+       JOIN materials mat ON m.material_id = mat.id
+       JOIN national_codes c ON m.national_code = c.code
+       ORDER BY m.national_code, m.cpse_name`
+    );
+    
+    // Build CSV
+    const headers = [
+      'National_Material_Code',
+      'SIS_Code',
+      'SAP_Code',
+      'Material_Description',
+      'Material_Known_As',
+      'Unit',
+      'CPSE_Name',
+      'Normalized_Description',
+      'Canonical_Description',
+      'Match_Result',
+      'Confidence',
+      'Cluster_ID',
+      'Review_Status',
+      'Product_Type',
+      'Material',
+      'Grade',
+      'Dimension',
+      'Dimension_Unit',
+      'Length',
+      'Length_Unit',
+      'Pressure',
+      'Pressure_Unit',
+      'Standard_Reference'
+    ];
+    
+    const rows = mappings.map(m => [
+      m.national_code,
+      m.original_code,
+      m.sap_code || '',
+      m.original_description,
+      m.material_known_as || '',
+      m.unit || '',
+      m.cpse_name,
+      m.normalized_description || '',
+      m.canonical_description || '',
+      m.match_status,
+      '', // Confidence - would need to be computed from matches
+      '', // Cluster_ID - would need to be joined
+      m.match_status === 'APPROVED' ? 'AI Approved' : 'Pending Review',
+      m.material_type || '',
+      m.material || '',
+      m.material_grade || '',
+      m.dimension || '',
+      m.dimension_unit || '',
+      m.length || '',
+      m.length_unit || '',
+      m.pressure || '',
+      m.pressure_unit || '',
+      m.standard_reference || ''
+    ]);
+    
+    const csvContent = [headers.join(','), ...rows.map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(','))].join('\n');
+    
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', 'attachment; filename="National_Material_Master.csv"');
+    res.send(csvContent);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 18. ERP / SAP Mock endpoints
 router.get('/erp/status', (req, res) => {
   res.json(erpMock.getConnectionStatus());
 });
@@ -763,14 +1296,22 @@ router.post('/erp/sync', async (req, res) => {
       
       const result = await db.run(
         `INSERT INTO materials (
-          cpse_name, original_code, description, specifications, technical_parameters,
+          cpse_name, original_code, sap_code, description, material_known_as, unit,
+          specifications, technical_parameters,
           material_type, material_grade, dimension, dimension_unit, length, length_unit,
-          standard_reference, unit_of_measurement, classification, match_status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING')`,
+          standard_reference, unit_of_measurement, classification, match_status,
+          thread_size, thread_length, thread_length_unit
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?, ?)`,
         [
-          item.cpse_name, item.original_code, item.description, item.specifications, item.technical_parameters,
-          item.material_type, item.material_grade, item.dimension, item.dimension_unit, item.length, item.length_unit,
-          item.standard_reference, item.unit_of_measurement, item.classification
+          item.cpse_name, item.original_code, item.sap_code || null, item.description, 
+          item.material_known_as || null, item.unit || null,
+          item.specifications, item.technical_parameters,
+          item.material_type, item.material_grade, item.dimension, item.dimension_unit, 
+          item.length, item.length_unit,
+          item.standard_reference, item.unit_of_measurement, item.classification,
+          null, // thread_size
+          null, // thread_length
+          null  // thread_length_unit
         ]
       );
       imported++;
@@ -813,7 +1354,10 @@ router.post('/demo/seed', async (req, res) => {
       {
         cpse_name: "CPSE A — Oil & Gas",
         original_code: "A101",
+        sap_code: "SAP001",
         description: "SS Pipe 25mm",
+        material_known_as: "STAINLESS STEEL PIPE",
+        unit: "EA",
         specifications: "Seamless, Schedule 40",
         technical_parameters: "Material: Stainless Steel, Grade: SS304, Size: 25 mm, Length: 6 m",
         material_type: "pipe",
@@ -826,12 +1370,18 @@ router.post('/demo/seed', async (req, res) => {
         pressure_unit: null,
         standard_reference: "ASME B16.9",
         unit_of_measurement: "METER",
-        classification: "Pipes & Tubes"
+        classification: "Pipes & Tubes",
+        thread_size: null,
+        thread_length: null,
+        thread_length_unit: null
       },
       {
         cpse_name: "CPSE B — Power",
         original_code: "B205",
+        sap_code: "SAP002",
         description: "Stainless Steel Tube 25 MM",
+        material_known_as: "STAINLESS STEEL PIPE",
+        unit: "EA",
         specifications: "SS Grade 304, seamless tube",
         technical_parameters: "Material: SS, Grade: 304, Diameter: 25mm, Length: 6000 mm",
         material_type: "pipe",
@@ -844,12 +1394,18 @@ router.post('/demo/seed', async (req, res) => {
         pressure_unit: null,
         standard_reference: "ASME B16.9",
         unit_of_measurement: "METER",
-        classification: "Pipes & Tubes"
+        classification: "Pipes & Tubes",
+        thread_size: null,
+        thread_length: null,
+        thread_length_unit: null
       },
       {
         cpse_name: "CPSE C — Steel",
         original_code: "C330",
+        sap_code: "SAP003",
         description: "S.S. PIPE DIA 25",
+        material_known_as: "STAINLESS STEEL PIPE",
+        unit: "EA",
         specifications: "Seamless, Grade 304, Schedule 40",
         technical_parameters: "Dia: 25 mm, Length: 6 meter, Material: SS304",
         material_type: "pipe",
@@ -862,14 +1418,20 @@ router.post('/demo/seed', async (req, res) => {
         pressure_unit: null,
         standard_reference: "ASME B16.9",
         unit_of_measurement: "METER",
-        classification: "Pipes & Tubes"
+        classification: "Pipes & Tubes",
+        thread_size: null,
+        thread_length: null,
+        thread_length_unit: null
       },
 
       // GROUP 2: Equivalent Carbon Steel Valves (CS Valve DN50)
       {
         cpse_name: "CPSE A — Oil & Gas",
         original_code: "A102",
+        sap_code: "SAP004",
         description: "Carbon Steel Valve 50mm",
+        material_known_as: "CS VALVE",
+        unit: "EA",
         specifications: "Cast steel globe valve, Class 150",
         technical_parameters: "Material: CS, Grade: WCB, Dimension: 50 mm, Class: 150, Cert: API 6D",
         material_type: "valve",
@@ -882,12 +1444,18 @@ router.post('/demo/seed', async (req, res) => {
         pressure_unit: "CLASS",
         standard_reference: "API 6D",
         unit_of_measurement: "PIECE",
-        classification: "Valves"
+        classification: "Valves",
+        thread_size: null,
+        thread_length: null,
+        thread_length_unit: null
       },
       {
         cpse_name: "CPSE B — Power",
         original_code: "B206",
+        sap_code: "SAP005",
         description: "CS Valve DN50",
+        material_known_as: "CS VALVE",
+        unit: "EA",
         specifications: "Globe valve, Flanged class 150",
         technical_parameters: "DN: 50 mm, rating 150#, standard API 6D",
         material_type: "valve",
@@ -907,7 +1475,10 @@ router.post('/demo/seed', async (req, res) => {
       {
         cpse_name: "CPSE A — Oil & Gas",
         original_code: "A103",
+        sap_code: "SAP006",
         description: "Steel Pipe",
+        material_known_as: "STAINLESS STEEL PIPE",
+        unit: "EA",
         specifications: "Grade SS304, Size 25mm",
         technical_parameters: "Stainless Steel, Grade 304, Dia 25mm",
         material_type: "pipe",
@@ -920,12 +1491,18 @@ router.post('/demo/seed', async (req, res) => {
         pressure_unit: null,
         standard_reference: "ASME B16.9",
         unit_of_measurement: "METER",
-        classification: "Pipes & Tubes"
+        classification: "Pipes & Tubes",
+        thread_size: null,
+        thread_length: null,
+        thread_length_unit: null
       },
       {
         cpse_name: "CPSE B — Power",
         original_code: "B207",
+        sap_code: "SAP007",
         description: "Steel Pipe",
+        material_known_as: "CARBON STEEL PIPE",
+        unit: "EA",
         specifications: "Carbon steel, ASTM A106 Grade B, Size 100mm",
         technical_parameters: "Carbon steel, A106 Gr B, Size 100 mm",
         material_type: "pipe",
@@ -938,14 +1515,20 @@ router.post('/demo/seed', async (req, res) => {
         pressure_unit: null,
         standard_reference: "ASTM A106",
         unit_of_measurement: "METER",
-        classification: "Pipes & Tubes"
+        classification: "Pipes & Tubes",
+        thread_size: null,
+        thread_length: null,
+        thread_length_unit: null
       },
 
       // GROUP 4: Different Names (Reviewable Candidate: Steel Gauge vs SS Pipe)
       {
         cpse_name: "CPSE A — Oil & Gas",
         original_code: "A104",
+        sap_code: "SAP008",
         description: "Steel Gauge",
+        material_known_as: "PRESSURE GAUGE",
+        unit: "EA",
         specifications: "Pressure Gauge 0-10 bar, 1/4\" connection",
         technical_parameters: "Range 10 bar, SS casing, 1/4 inch NPT entry",
         material_type: "gauge",
@@ -958,12 +1541,18 @@ router.post('/demo/seed', async (req, res) => {
         pressure_unit: "BAR",
         standard_reference: null,
         unit_of_measurement: "PIECE",
-        classification: "Instrumentation"
+        classification: "Instrumentation",
+        thread_size: null,
+        thread_length: null,
+        thread_length_unit: null
       },
       {
         cpse_name: "CPSE B — Power",
         original_code: "B208",
+        sap_code: "SAP009",
         description: "Stainless Steel Pipe",
+        material_known_as: "SS PIPE",
+        unit: "EA",
         specifications: "Grade 304, Size 25mm",
         technical_parameters: "SS304, 25mm diameter",
         material_type: "pipe",
@@ -976,14 +1565,20 @@ router.post('/demo/seed', async (req, res) => {
         pressure_unit: null,
         standard_reference: "ASME B16.9",
         unit_of_measurement: "METER",
-        classification: "Pipes & Tubes"
+        classification: "Pipes & Tubes",
+        thread_size: null,
+        thread_length: null,
+        thread_length_unit: null
       },
 
       // GROUP 5: Missing / Insufficient Data Case (Industrial Pipe)
       {
         cpse_name: "CPSE C — Steel",
         original_code: "C331",
+        sap_code: "SAP006",
         description: "Industrial Pipe",
+        material_known_as: "INDUSTRIAL PIPE",
+        unit: "M",
         specifications: null,
         technical_parameters: null,
         material_type: null,
@@ -996,14 +1591,20 @@ router.post('/demo/seed', async (req, res) => {
         pressure_unit: null,
         standard_reference: null,
         unit_of_measurement: "METER",
-        classification: "Pipes & Tubes"
+        classification: "Pipes & Tubes",
+        thread_size: null,
+        thread_length: null,
+        thread_length_unit: null
       },
 
       // ADDITIONAL DATA: Gaskets Group
       {
         cpse_name: "CPSE A — Oil & Gas",
         original_code: "A201",
+        sap_code: "SAP007",
         description: "Gskt Spwnd 150NB CS ASME B16.20",
+        material_known_as: "SPIRAL WOUND GASKET",
+        unit: "EA",
         specifications: "Spiral wound gasket, outer ring carbon steel",
         technical_parameters: "Dimension: 150 NB, Rating: 150 LBS, Spec: ASME B16.20",
         material_type: "gasket",
@@ -1014,12 +1615,18 @@ router.post('/demo/seed', async (req, res) => {
         pressure_unit: "LBS",
         standard_reference: "ASME B16.20",
         unit_of_measurement: "PIECE",
-        classification: "Gaskets"
+        classification: "Gaskets",
+        thread_size: null,
+        thread_length: null,
+        thread_length_unit: null
       },
       {
         cpse_name: "CPSE B — Power",
         original_code: "B304",
+        sap_code: "SAP008",
         description: "Spiral Wound Gasket 150 NB Carbon Steel B16.20",
+        material_known_as: "SPIRAL WOUND GASKET",
+        unit: "EA",
         specifications: "Standard 150 NB spiral gasket CS",
         technical_parameters: "150 NB CS ASME B16.20 Gasket",
         material_type: "gasket",
@@ -1030,14 +1637,20 @@ router.post('/demo/seed', async (req, res) => {
         pressure_unit: "LBS",
         standard_reference: "ASME B16.20",
         unit_of_measurement: "PIECE",
-        classification: "Gaskets"
+        classification: "Gaskets",
+        thread_size: null,
+        thread_length: null,
+        thread_length_unit: null
       },
 
       // Flanges Group
       {
         cpse_name: "CPSE C — Steel",
         original_code: "C401",
+        sap_code: "SAP009",
         description: "Flange Slip On 80NB Class 150 ASME B16.5",
+        material_known_as: "SLIP-ON FLANGE",
+        unit: "EA",
         specifications: "Slip-on carbon steel flange A105",
         technical_parameters: "Size: 80 NB, Class 150, ASTM A105",
         material_type: "flange",
@@ -1048,12 +1661,18 @@ router.post('/demo/seed', async (req, res) => {
         pressure_unit: "CLASS",
         standard_reference: "ASME B16.5",
         unit_of_measurement: "PIECE",
-        classification: "Flanges"
+        classification: "Flanges",
+        thread_size: null,
+        thread_length: null,
+        thread_length_unit: null
       },
       {
         cpse_name: "CPSE D — Mining",
         original_code: "D112",
+        sap_code: "SAP010",
         description: "SORF Flange 80 NB A105 Class 150",
+        material_known_as: "SLIP-ON FLANGE",
+        unit: "EA",
         specifications: "Slip-on raised face flange, A105 carbon steel",
         technical_parameters: "Flange 80NB class 150 standard B16.5",
         material_type: "flange",
@@ -1064,7 +1683,10 @@ router.post('/demo/seed', async (req, res) => {
         pressure_unit: "CLASS",
         standard_reference: "ASME B16.5",
         unit_of_measurement: "PIECE",
-        classification: "Flanges"
+        classification: "Flanges",
+        thread_size: null,
+        thread_length: null,
+        thread_length_unit: null
       }
     ];
 
@@ -1091,7 +1713,10 @@ router.post('/demo/seed', async (req, res) => {
       const details = {
         cpse_name: cpse,
         original_code: code,
+        sap_code: `SAP${1000 + i}`,
         description: `${grade} ${type.charAt(0).toUpperCase() + type.slice(1)} ${size}mm`,
+        material_known_as: `${grade} ${type.toUpperCase()}`,
+        unit: type === "pipe" ? "M" : "EA",
         specifications: `Standard industrial grade ${type}`,
         technical_parameters: `Size: ${size} mm, Grade: ${grade}`,
         material_type: type,
@@ -1104,7 +1729,10 @@ router.post('/demo/seed', async (req, res) => {
         pressure_unit: ["valve", "gasket", "flange"].includes(type) ? "CLASS" : null,
         standard_reference: type === "pipe" ? "ASME B16.9" : "ASME B16.5",
         unit_of_measurement: type === "pipe" ? "METER" : "PIECE",
-        classification: type.charAt(0).toUpperCase() + type.slice(1) + "s"
+        classification: type.charAt(0).toUpperCase() + type.slice(1) + "s",
+        thread_size: null,
+        thread_length: null,
+        thread_length_unit: null
       };
       demoMaterials.push(details);
     }
@@ -1113,15 +1741,33 @@ router.post('/demo/seed', async (req, res) => {
     for (const mat of demoMaterials) {
       await db.run(
         `INSERT INTO materials (
-          cpse_name, original_code, description, specifications, technical_parameters,
+          cpse_name, original_code, sap_code, description, material_known_as, unit,
+          specifications, technical_parameters,
           material_type, material_grade, dimension, dimension_unit, length, length_unit,
-          pressure, pressure_unit, standard_reference, unit_of_measurement, classification,
-          match_status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING')`,
+          standard_reference, unit_of_measurement, classification, match_status,
+          thread_size, thread_length, thread_length_unit
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?, ?)`,
         [
-          mat.cpse_name, mat.original_code, mat.description, mat.specifications, mat.technical_parameters,
-          mat.material_type, mat.material_grade, mat.dimension, mat.dimension_unit, mat.length, mat.length_unit,
-          mat.pressure, mat.pressure_unit, mat.standard_reference, mat.unit_of_measurement, mat.classification,
+          mat.cpse_name,
+          mat.original_code,
+          mat.sap_code || null,
+          mat.description,
+          mat.material_known_as || null,
+          mat.unit || null,
+          mat.specifications || null,
+          mat.technical_parameters || null,
+          mat.material_type || null,
+          mat.material_grade || null,
+          mat.dimension || null,
+          mat.dimension_unit || null,
+          mat.length || null,
+          mat.length_unit || null,
+          mat.standard_reference || null,
+          mat.unit_of_measurement || null,
+          mat.classification || 'Unclassified',
+          mat.thread_size || null,
+          mat.thread_length || null,
+          mat.thread_length_unit || null
         ]
       );
     }

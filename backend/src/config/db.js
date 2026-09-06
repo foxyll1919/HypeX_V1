@@ -1,86 +1,40 @@
-const mysql = require('mysql2/promise');
-const fs = require('fs');
-const path = require('path');
+// Supabase client configuration for HypeX
+// Replaces MySQL mysql2/promise pool with Supabase JS client
+// Schema: supabase/migrations/001_initial_schema.sql
+
+const { createClient } = require('@supabase/supabase-js');
 const dotenv = require('dotenv');
 
 dotenv.config();
 
-const pool = mysql.createPool({
-  host: process.env.DB_HOST || 'localhost',
-  user: process.env.DB_USER || 'root',
-  password: process.env.DB_PASSWORD || '',
-  database: process.env.DB_NAME || 'nmm_db',
-  waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0,
-  multipleStatements: true // Required to run schema.sql
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseKey = process.env.SUPABASE_SERVICE_KEY;
+
+if (!supabaseUrl || !supabaseKey) {
+  console.error('Missing Supabase credentials. Set SUPABASE_URL and SUPABASE_SERVICE_KEY in .env');
+  process.exit(1);
+}
+
+const supabase = createClient(supabaseUrl, supabaseKey, {
+  auth: {
+    autoRefreshToken: false,
+    persistSession: false
+  }
 });
 
-pool.getConnection()
-  .then(conn => {
-    console.log('Connected to the MySQL database.');
-    initializeDatabase(conn);
-  })
-  .catch(err => {
-    console.error('Error connecting to MySQL database:', err.message);
-  });
-
-async function initializeDatabase(conn) {
-  const schemaPath = path.join(__dirname, '../../../database/schema.sql');
-  if (fs.existsSync(schemaPath)) {
-    const schemaSql = fs.readFileSync(schemaPath, 'utf8');
-    try {
-      await conn.query(schemaSql);
-      console.log('Database tables initialized successfully.');
-      await seedDefaultUsers(conn);
-    } catch (err) {
-      console.error('Error executing schema.sql:', err.message);
-    } finally {
-      conn.release();
-    }
-  } else {
-    console.error('schema.sql not found at:', schemaPath);
-    conn.release();
-  }
-}
-
-async function seedDefaultUsers(conn) {
+// Verify connection on startup
+async function verifyConnection() {
   try {
-    const [rows] = await conn.query("SELECT count(*) as count FROM users");
-    if (rows[0].count === 0) {
-      const defaultUsers = [
-        ['admin', 'admin123', 'ADMIN', 'System Administrator'],
-        ['manager', 'manager123', 'MANAGER', 'Data Manager'],
-        ['reviewer', 'reviewer123', 'REVIEWER', 'Match Reviewer'],
-        ['approver', 'approver123', 'APPROVER', 'Senior Approver'],
-        ['viewer', 'viewer123', 'VIEWER', 'Guest Viewer']
-      ];
-      for (const u of defaultUsers) {
-        await conn.execute("INSERT INTO users (username, password, role, full_name) VALUES (?, ?, ?, ?)", u);
-      }
-      console.log('Seeded default users for demo.');
-    }
+    const { data, error } = await supabase.from('users').select('count', { count: 'exact', head: true });
+    if (error) throw error;
+    console.log('Connected to Supabase successfully.');
+    return true;
   } catch (err) {
-    console.error('Error seeding users:', err.message);
+    console.error('Error connecting to Supabase:', err.message);
+    return false;
   }
 }
 
-const query = {
-  all: async (sql, params = []) => {
-    const [rows] = await pool.query(sql, params);
-    return rows;
-  },
-  get: async (sql, params = []) => {
-    const [rows] = await pool.query(sql, params);
-    return rows[0];
-  },
-  run: async (sql, params = []) => {
-    const [result] = await pool.execute(sql, params);
-    return { id: result.insertId, changes: result.affectedRows };
-  },
-  exec: async (sql) => {
-    await pool.query(sql);
-  }
-};
+verifyConnection();
 
-module.exports = query;
+module.exports = supabase;

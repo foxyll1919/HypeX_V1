@@ -34,6 +34,16 @@ export const uploadMaterials = async (materials) => {
   return response.data;
 };
 
+export const startUploadJob = async (materials, cpseName) => {
+  const response = await api.post('/upload/start', { materials, cpseName });
+  return response.data;
+};
+
+export const getUploadJobStatus = async (jobId) => {
+  const response = await api.get(`/upload/status/${jobId}`);
+  return response.data;
+};
+
 export const getMatches = async () => {
   const response = await api.get('/matches');
   return response.data;
@@ -66,6 +76,16 @@ export const getClusterDetails = async (id) => {
 
 export const getNationalCodes = async () => {
   const response = await api.get('/national-codes');
+  return response.data;
+};
+
+export const generateNationalCodes = async () => {
+  const response = await api.post('/national-codes/generate');
+  return response.data;
+};
+
+export const exportNationalCodes = async () => {
+  const response = await api.get('/national-codes/export', { responseType: 'blob' });
   return response.data;
 };
 
@@ -110,6 +130,8 @@ export default {
   addMaterial,
   updateMaterial,
   uploadMaterials,
+  startUploadJob,
+  getUploadJobStatus,
   getMatches,
   runMatching,
   approveMatch,

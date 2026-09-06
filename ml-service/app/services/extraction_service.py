@@ -21,6 +21,37 @@ STANDARDS = [
 ]
 
 
+def extract_thread_specification(desc: str) -> Dict[str, Any]:
+    """
+    Extract thread specifications like M16x50, M16 X 50, M16X50, M10x40mm.
+    Returns thread_size (e.g., M16) and thread_length (e.g., 50 mm).
+    """
+    result = {
+        "thread_size": None,
+        "thread_length": None,
+        "thread_length_unit": None
+    }
+    
+    # Pattern for M16x50, M16 X 50, M16X50, M10x40mm, M12x30 mm
+    # Case insensitive, no strict word boundaries
+    thread_pattern = r'(M\d+(?:\.\d+)?)\s*[xX]\s*(\d+(?:\.\d+)?)\s*(mm|cm|m|inch|in)?'
+    match = re.search(thread_pattern, desc, re.IGNORECASE)
+    if match:
+        result["thread_size"] = match.group(1).upper()  # M16
+        result["thread_length"] = match.group(2)  # 50
+        unit = match.group(3).lower() if match.group(3) else 'mm'
+        if unit in ['cm', 'centimeter', 'centimeters']:
+            result["thread_length_unit"] = 'cm'
+        elif unit in ['m', 'meter', 'meters']:
+            result["thread_length_unit"] = 'm'
+        elif unit in ['inch', 'in', 'inches', '"']:
+            result["thread_length_unit"] = 'inch'
+        else:
+            result["thread_length_unit"] = 'mm'
+    
+    return result
+
+
 def extract_attributes(description: str, normalized_desc: Optional[str] = None) -> Dict[str, Any]:
     desc = normalized_desc if normalized_desc else description.lower()
     desc_raw = description.lower()
@@ -36,6 +67,9 @@ def extract_attributes(description: str, normalized_desc: Optional[str] = None) 
         "pressure": None,
         "pressure_unit": None,
         "standard_reference": None,
+        "thread_size": None,
+        "thread_length": None,
+        "thread_length_unit": None,
     }
 
     for pt in PRODUCT_TYPES:
@@ -95,6 +129,17 @@ def extract_attributes(description: str, normalized_desc: Optional[str] = None) 
         if dn_match:
             result["dimension"] = dn_match.group(2)
             result["dimension_unit"] = dn_match.group(1).upper()
+
+    # Extract thread specification (e.g., M16x50)
+    thread_spec = extract_thread_specification(desc)
+    result["thread_size"] = thread_spec["thread_size"]
+    result["thread_length"] = thread_spec["thread_length"]
+    result["thread_length_unit"] = thread_spec["thread_length_unit"]
+
+    # If thread spec found and no regular dimension, use thread size as dimension
+    if result["thread_size"] and not result["dimension"]:
+        result["dimension"] = result["thread_size"].replace('M', '')
+        result["dimension_unit"] = 'mm'
 
     length_pattern = r'\b(\d+(?:\.\d+)?)\s*(m|meter|meters|mm|millimeters|length)\b'
     for match in re.finditer(length_pattern, desc):

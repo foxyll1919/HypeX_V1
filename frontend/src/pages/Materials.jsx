@@ -133,9 +133,12 @@ const Materials = () => {
             <table className="custom-table">
               <thead>
                 <tr>
-                  <th>Original Code</th>
+                  <th>SIS Code</th>
+                  <th>SAP Code</th>
                   <th>CPSE Owner</th>
-                  <th>Raw Description</th>
+                  <th>Material Description</th>
+                  <th>Material Known As</th>
+                  <th>Unit</th>
                   <th>Grade</th>
                   <th>Dimension</th>
                   <th>Status</th>
@@ -146,7 +149,7 @@ const Materials = () => {
               <tbody>
                 {materials.length === 0 ? (
                   <tr>
-                    <td colSpan="8" style={{ textAlign: 'center', padding: '40px', color: '#64748b' }}>
+                    <td colSpan="11" style={{ textAlign: 'center', padding: '40px', color: '#64748b' }}>
                       No material records found. Try modifying filters or seeding the database.
                     </td>
                   </tr>
@@ -154,10 +157,15 @@ const Materials = () => {
                   materials.map((mat) => (
                     <tr key={mat.id}>
                       <td style={{ fontWeight: 600, color: '#0f172a' }}>{mat.original_code}</td>
+                      <td style={{ fontSize: '0.8rem', color: '#64748b' }}>{mat.sap_code || '-'}</td>
                       <td style={{ fontSize: '0.8rem', color: '#64748b' }}>{mat.cpse_name.split('—')[0]}</td>
                       <td style={{ maxWidth: '280px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={mat.description}>
                         {mat.description}
                       </td>
+                      <td style={{ maxWidth: '180px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={mat.material_known_as}>
+                        {mat.material_known_as || '-'}
+                      </td>
+                      <td>{mat.unit || '-'}</td>
                       <td>{mat.material_grade || '-'}</td>
                       <td>{mat.dimension ? `${mat.dimension} ${mat.dimension_unit || ''}` : '-'}</td>
                       <td>
@@ -208,8 +216,11 @@ const Materials = () => {
             <table style={{ width: '100%', fontSize: '0.9rem', borderCollapse: 'collapse' }}>
               <tbody>
                 <tr style={{ borderBottom: '1px solid #f1f5f9' }}><td style={{ padding: '8px 0', fontWeight: 600 }}>CPSE Owner</td><td>{selectedMaterial.cpse_name}</td></tr>
-                <tr style={{ borderBottom: '1px solid #f1f5f9' }}><td style={{ padding: '8px 0', fontWeight: 600 }}>Original Code</td><td>{selectedMaterial.original_code}</td></tr>
-                <tr style={{ borderBottom: '1px solid #f1f5f9' }}><td style={{ padding: '8px 0', fontWeight: 600 }}>Raw Description</td><td>{selectedMaterial.description}</td></tr>
+                <tr style={{ borderBottom: '1px solid #f1f5f9' }}><td style={{ padding: '8px 0', fontWeight: 600 }}>SIS Code</td><td>{selectedMaterial.original_code}</td></tr>
+                <tr style={{ borderBottom: '1px solid #f1f5f9' }}><td style={{ padding: '8px 0', fontWeight: 600 }}>SAP Code</td><td>{selectedMaterial.sap_code || '-'}</td></tr>
+                <tr style={{ borderBottom: '1px solid #f1f5f9' }}><td style={{ padding: '8px 0', fontWeight: 600 }}>Material Description</td><td>{selectedMaterial.description}</td></tr>
+                <tr style={{ borderBottom: '1px solid #f1f5f9' }}><td style={{ padding: '8px 0', fontWeight: 600 }}>Material Known As</td><td>{selectedMaterial.material_known_as || '-'}</td></tr>
+                <tr style={{ borderBottom: '1px solid #f1f5f9' }}><td style={{ padding: '8px 0', fontWeight: 600 }}>Unit</td><td>{selectedMaterial.unit || '-'}</td></tr>
                 <tr style={{ borderBottom: '1px solid #f1f5f9' }}><td style={{ padding: '8px 0', fontWeight: 600 }}>Normalized</td><td>{selectedMaterial.normalized_description || '-'}</td></tr>
                 <tr style={{ borderBottom: '1px solid #f1f5f9' }}><td style={{ padding: '8px 0', fontWeight: 600 }}>Product Type</td><td>{selectedMaterial.material_type || '-'}</td></tr>
                 <tr style={{ borderBottom: '1px solid #f1f5f9' }}><td style={{ padding: '8px 0', fontWeight: 600 }}>Material/Grade</td><td>{selectedMaterial.material_grade || '-'}</td></tr>
@@ -234,8 +245,28 @@ const Materials = () => {
           </div>
           <form onSubmit={handleSaveEdit} style={{ flex: 1, overflowY: 'auto' }}>
             <div className="form-group">
-              <label className="form-label">Raw Description</label>
+              <label className="form-label">CPSE</label>
+              <input type="text" className="form-input" value={editingMaterial.cpse_name || ''} onChange={(e) => setEditingMaterial({ ...editingMaterial, cpse_name: e.target.value })} required />
+            </div>
+            <div className="form-group">
+              <label className="form-label">SIS Code</label>
+              <input type="text" className="form-input" value={editingMaterial.original_code || ''} onChange={(e) => setEditingMaterial({ ...editingMaterial, original_code: e.target.value })} required />
+            </div>
+            <div className="form-group">
+              <label className="form-label">SAP Code</label>
+              <input type="text" className="form-input" value={editingMaterial.sap_code || ''} onChange={(e) => setEditingMaterial({ ...editingMaterial, sap_code: e.target.value })} />
+            </div>
+            <div className="form-group">
+              <label className="form-label">Material Description</label>
               <input type="text" className="form-input" value={editingMaterial.description} onChange={(e) => setEditingMaterial({ ...editingMaterial, description: e.target.value })} required />
+            </div>
+            <div className="form-group">
+              <label className="form-label">Material Known As</label>
+              <input type="text" className="form-input" value={editingMaterial.material_known_as || ''} onChange={(e) => setEditingMaterial({ ...editingMaterial, material_known_as: e.target.value })} />
+            </div>
+            <div className="form-group">
+              <label className="form-label">Unit</label>
+              <input type="text" className="form-input" value={editingMaterial.unit || ''} onChange={(e) => setEditingMaterial({ ...editingMaterial, unit: e.target.value })} />
             </div>
             <div className="form-group">
               <label className="form-label">Product Type</label>
@@ -268,6 +299,10 @@ const Materials = () => {
             <div className="form-group">
               <label className="form-label">Standard Reference</label>
               <input type="text" className="form-input" value={editingMaterial.standard_reference || ''} onChange={(e) => setEditingMaterial({ ...editingMaterial, standard_reference: e.target.value })} />
+            </div>
+            <div className="form-group">
+              <label className="form-label">Classification</label>
+              <input type="text" className="form-input" value={editingMaterial.classification || ''} onChange={(e) => setEditingMaterial({ ...editingMaterial, classification: e.target.value })} />
             </div>
             
             <div style={{ marginTop: '24px', display: 'flex', gap: '12px' }}>

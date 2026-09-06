@@ -36,6 +36,12 @@ async def run_pipeline(materials: List[Dict[str, Any]]) -> Dict[str, Any]:
             mat_copy["pressure_unit"] = extracted["pressure_unit"]
         if not mat_copy.get("standard_reference"):
             mat_copy["standard_reference"] = extracted["standard_reference"]
+        if not mat_copy.get("thread_size"):
+            mat_copy["thread_size"] = extracted["thread_size"]
+        if not mat_copy.get("thread_length"):
+            mat_copy["thread_length"] = extracted["thread_length"]
+        if not mat_copy.get("thread_length_unit"):
+            mat_copy["thread_length_unit"] = extracted["thread_length_unit"]
 
         if not mat_copy.get("embedding"):
             mat_copy["embedding"] = await embedding_service.generate_embedding(norm_desc)
