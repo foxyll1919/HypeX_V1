@@ -5,23 +5,13 @@ services:
     plan: starter
     rootDir: ml-service
     buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /health
     autoDeploy: true
     envVars:
       - key: PYTHON_VERSION
-        value: "3.13.7"
+        value: "3.11.11"
       - key: LOG_LEVEL
         value: INFO
       - key: LOG_FORMAT
         value: json
-      - key: EMBEDDING_DIMENSION
-        value: "384"
-      - key: LLAMA_SERVER_URL
-        sync: false
-      - key: LLAMA_MODEL_NAME
-        value: Qwen3-Embedding-4B
-      - key: LLAMA_EMBEDDING_ENDPOINT
-        value: /v1/embeddings
-      - key: LLAMA_TIMEOUT_SECONDS
-        value: "120"
