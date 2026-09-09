@@ -1,10 +1,12 @@
 const express = require('express');
 const cors = require('cors');
 const dotenv = require('dotenv');
-const apiRouter = require('./routes/api');
-require('./config/db'); // Bootstraps SQLite connection and creates schema
 
+// Load environment variables FIRST, before requiring any modules that use them
 dotenv.config();
+
+const apiRouter = require('./routes/api');
+require('./config/db'); // Bootstraps MySQL connection and creates schema
 
 const app = express();
 const port = process.env.PORT || 5000;
@@ -21,9 +23,9 @@ app.use('/api', apiRouter);
 // Global express error handler
 app.use((err, req, res, next) => {
   console.error('Unhandled API Error:', err.stack);
-  res.status(500).json({ 
-    error: 'Internal Server Error', 
-    details: err.message 
+  res.status(500).json({
+    error: 'Internal Server Error',
+    details: err.message
   });
 });
 
@@ -31,3 +33,4 @@ app.listen(port, () => {
   console.log(`Node.js/Express Backend running on http://localhost:${port}`);
   console.log(`Database sync connector ready.`);
 });
+
