@@ -5,8 +5,10 @@ const dotenv = require('dotenv');
 // Load environment variables FIRST, before requiring any modules that use them
 dotenv.config();
 
-const apiRouter = require('./routes/api');
-require('./config/db'); // Bootstraps MySQL connection and creates schema
+const db = require('./config/db');
+const apiRouter = db.isSupabase
+  ? require('./routes/api-supabase')
+  : require('./routes/api');
 
 const app = express();
 const port = process.env.PORT || 5000;
@@ -31,6 +33,6 @@ app.use((err, req, res, next) => {
 
 app.listen(port, () => {
   console.log(`Node.js/Express Backend running on http://localhost:${port}`);
-  console.log(`Database sync connector ready.`);
+  console.log(`Database provider: ${db.isSupabase ? 'Supabase' : 'MySQL'}.`);
 });
 

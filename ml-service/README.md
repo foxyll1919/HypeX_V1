@@ -147,6 +147,18 @@ cd ml-service
 pytest tests/ -v
 ```
 
+### Deploy to Render
+
+The repository root contains `render.yaml` for deploying this service as a Render web service. Render runs the API with:
+
+```bash
+uvicorn main:app --host 0.0.0.0 --port $PORT
+```
+
+The service is healthy at `/health`. Set `LLAMA_SERVER_URL` in Render to a reachable external llama.cpp embedding server to use Qwen in production. Render cannot reach a developer machine's `127.0.0.1:8080`; when the variable is unset or unreachable, the service falls back to sentence-transformers when installed and then deterministic feature hashing.
+
+Deploy from the Render dashboard by selecting **New + > Blueprint**, connecting the repository, and choosing `render.yaml`. The local GGUF file is intentionally not included in the web service image; use a separate model host or managed embedding endpoint for production Qwen inference.
+
 ## Environment Variables
 
 | Variable | Default | Description |

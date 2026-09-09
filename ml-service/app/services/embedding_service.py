@@ -1,4 +1,5 @@
 import hashlib
+import asyncio
 import numpy as np
 from typing import List, Optional
 import httpx
@@ -13,16 +14,33 @@ logger = get_logger(__name__)
 class EmbeddingService:
     def __init__(self):
         self._client: Optional[httpx.AsyncClient] = None
+        self._client_loop = None
         self._fallback_dim = settings.FALLBACK_EMBEDDING_DIM
 
+    def _fit_embedding_dimension(self, values: List[float]) -> List[float]:
+        vector = np.zeros(self._fallback_dim, dtype=float)
+        for index, value in enumerate(values):
+            vector[index % self._fallback_dim] += float(value)
+        norm = np.linalg.norm(vector)
+        if norm > 0:
+            vector /= norm
+        return vector.tolist()
+
     async def _get_client(self) -> httpx.AsyncClient:
-        if self._client is None or self._client.is_closed:
+        current_loop = asyncio.get_running_loop()
+        if (
+            self._client is None
+            or self._client.is_closed
+            or self._client_loop is not current_loop
+        ):
             self._client = httpx.AsyncClient(timeout=settings.LLAMA_TIMEOUT_SECONDS)
+            self._client_loop = current_loop
         return self._client
 
     async def close(self) -> None:
         if self._client and not self._client.is_closed:
             await self._client.aclose()
+        self._client_loop = None
 
     def _get_fallback_embedding(self, text: str) -> List[float]:
         if not text:
@@ -62,7 +80,7 @@ class EmbeddingService:
             if "data" in data and len(data["data"]) > 0:
                 emb = data["data"][0].get("embedding")
                 if emb:
-                    return [float(x) for x in emb]
+                    return self._fit_embedding_dimension(emb)
         except httpx.HTTPError as e:
             logger.warning(f"Qwen embedding request failed: {e}")
         except Exception as e:
@@ -109,7 +127,7 @@ class EmbeddingService:
                     for j, item in enumerate(data["data"]):
                         emb = item.get("embedding")
                         if emb:
-                            results[indices[j]] = [float(x) for x in emb]
+                            results[indices[j]] = self._fit_embedding_dimension(emb)
             except Exception as e:
                 logger.warning(f"Qwen batch embedding failed: {e}")
 

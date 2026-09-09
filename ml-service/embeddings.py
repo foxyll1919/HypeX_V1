@@ -1,19 +1,53 @@
+import hashlib
+import os
+from typing import List, Optional
+
+import httpx
 import numpy as np
-from typing import List
 
-# Module variables for sentence-transformers
-USE_SENTENCE_TRANSFORMERS = False
-model = None
+LLAMA_SERVER_URL = os.getenv("LLAMA_SERVER_URL", "http://127.0.0.1:8080")
+LLAMA_EMBEDDING_ENDPOINT = os.getenv("LLAMA_EMBEDDING_ENDPOINT", "/v1/embeddings")
+LLAMA_MODEL_NAME = os.getenv("LLAMA_MODEL_NAME", "Qwen3-Embedding-4B")
+EMBEDDING_DIMENSION = int(os.getenv("EMBEDDING_DIMENSION", "384"))
+_sentence_transformer = None
 
-try:
-    print("Loading SentenceTransformer model 'all-MiniLM-L6-v2'...")
-    from sentence_transformers import SentenceTransformer
-    # Initialize the model
-    model = SentenceTransformer('all-MiniLM-L6-v2')
-    USE_SENTENCE_TRANSFORMERS = True
-    print("SentenceTransformer loaded successfully.")
-except Exception as e:
-    print(f"Warning: Could not load SentenceTransformer ({e}). Using robust feature-hash embedding generator.")
+
+def _try_sentence_transformer(text: str) -> Optional[List[float]]:
+    global _sentence_transformer
+    try:
+        if _sentence_transformer is None:
+            from sentence_transformers import SentenceTransformer
+            _sentence_transformer = SentenceTransformer("all-MiniLM-L6-v2")
+        return _sentence_transformer.encode(text).tolist()
+    except Exception:
+        return None
+
+
+def _try_qwen_embedding(text: str) -> Optional[List[float]]:
+    try:
+        response = httpx.post(
+            f"{LLAMA_SERVER_URL}{LLAMA_EMBEDDING_ENDPOINT}",
+            json={"model": LLAMA_MODEL_NAME, "input": [text]},
+            timeout=float(os.getenv("LLAMA_TIMEOUT_SECONDS", "120")),
+        )
+        response.raise_for_status()
+        items = response.json().get("data", [])
+        if items and items[0].get("embedding"):
+            return _fit_embedding_dimension(items[0]["embedding"])
+    except Exception as exc:
+        print(f"Qwen embedding unavailable ({exc}); trying fallback provider.")
+    return None
+
+
+def _fit_embedding_dimension(values: List[float]) -> List[float]:
+    """Fold model vectors into the existing 384-dimensional database contract."""
+    vector = np.zeros(EMBEDDING_DIMENSION, dtype=float)
+    for index, value in enumerate(values):
+        vector[index % EMBEDDING_DIMENSION] += float(value)
+    norm = np.linalg.norm(vector)
+    if norm > 0:
+        vector /= norm
+    return vector.tolist()
 
 def get_fallback_embedding(text: str, dimension: int = 384) -> List[float]:
     """
@@ -28,8 +62,8 @@ def get_fallback_embedding(text: str, dimension: int = 384) -> List[float]:
     
     # Feature hash words to index positions
     for word in words:
-        h1 = hash(word) % dimension
-        h2 = (hash(word + "_salt") ^ 0xabcdef) % dimension
+        h1 = int(hashlib.md5(word.encode()).hexdigest(), 16) % dimension
+        h2 = int(hashlib.md5((word + "_salt").encode()).hexdigest(), 16) % dimension
         vector[h1] += 1.0
         vector[h2] += 0.5
         
@@ -37,7 +71,7 @@ def get_fallback_embedding(text: str, dimension: int = 384) -> List[float]:
     chars = text.lower()
     for i in range(len(chars) - 1):
         bigram = chars[i:i+2]
-        h = hash(bigram) % dimension
+        h = int(hashlib.md5(bigram.encode()).hexdigest(), 16) % dimension
         vector[h] += 0.2
         
     # Unit normalization (L2 norm)
@@ -52,15 +86,11 @@ def generate_embedding(text: str) -> List[float]:
     Computes a 384-dimensional vector embedding.
     Attempts sentence-transformers first, and falls back to feature-hashing if not installed/configured.
     """
-    if USE_SENTENCE_TRANSFORMERS and model is not None:
-        try:
-            emb = model.encode(text)
-            return emb.tolist()
-        except Exception as e:
-            print(f"Embedding error: {e}. Falling back to hash vectorizer.")
-            return get_fallback_embedding(text)
-    else:
-        return get_fallback_embedding(text)
+    return (
+        _try_qwen_embedding(text)
+        or _try_sentence_transformer(text)
+        or get_fallback_embedding(text)
+    )
 
 def calculate_cosine_similarity(emb_a: List[float], emb_b: List[float]) -> float:
     """

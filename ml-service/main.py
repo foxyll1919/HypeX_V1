@@ -19,6 +19,10 @@ app = FastAPI(
     description="Python FastAPI NLP & Semantic Matching Pipeline for Material Master Standardization."
 )
 
+@app.get("/health")
+def health_endpoint():
+    return {"status": "healthy"}
+
 @app.post("/normalize", response_model=NormalizeResponse)
 def normalize_endpoint(req: NormalizeRequest):
     return NormalizeResponse(

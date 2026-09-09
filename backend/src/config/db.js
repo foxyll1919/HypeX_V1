@@ -1,5 +1,5 @@
-// MySQL database configuration for HypeX
-// Uses mysql2/promise for promise-based queries
+// Database configuration for HypeX. Supabase is preferred when configured;
+// MySQL remains available as the local fallback.
 
 const mysql = require('mysql2/promise');
 const fs = require('fs');
@@ -7,6 +7,19 @@ const path = require('path');
 const dotenv = require('dotenv');
 
 dotenv.config();
+
+const hasSupabaseConfig = Boolean(
+  process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY
+);
+
+if (hasSupabaseConfig && process.env.DB_PROVIDER !== 'mysql') {
+  const { createClient } = require('@supabase/supabase-js');
+  const client = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
+  client.isSupabase = true;
+  console.log('Using Supabase database provider.');
+  module.exports = client;
+  return;
+}
 
 const pool = mysql.createPool({
   host: process.env.DB_HOST || 'localhost',
@@ -127,3 +140,4 @@ const query = {
 
 module.exports = query;
 module.exports.pool = pool;
+module.exports.isSupabase = false;
